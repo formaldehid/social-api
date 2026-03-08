@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Rustfmt check
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (deny warnings, allow dead_code scaffolding)
+        run: cargo clippy --all-targets --all-features -- -D warnings -A dead_code
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --all --all-features
+
+  docker-smoke:
+    name: Docker Compose smoke + E2E contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      # docker compose is available on ubuntu-latest
+      - name: Build & start stack
+        run: |
+          docker compose up -d --build
+
+      - name: Wait for social-api readiness
+        run: |
+          set -euo pipefail
+          for i in {1..60}; do
+            if curl -fsS http://localhost:8080/health/ready >/dev/null; then
+              echo "ready"
+              exit 0
+            fi
+            echo "not ready yet ($i)..."
+            sleep 2
+          done
+          echo "Timed out waiting for readiness"
+          docker compose ps
+          docker compose logs --no-color --tail=200 social-api || true
+          exit 1
+
+      - name: Quick smoke checks
+        run: |
+          set -euo pipefail
+
+          curl -fsS http://localhost:8080/health/live
+          curl -fsS http://localhost:8080/health/ready
+
+          # Metrics endpoint exists
+          curl -fsS http://localhost:8080/metrics | grep -E '^# (HELP|TYPE) social_api_'
+
+          # Count endpoint (public)
+          curl -fsS http://localhost:8080/v1/likes/post/731b0395-4888-4822-b516-05b4b7bf2089/count
+
+          # Auth status endpoint (requires token)
+          curl -fsS http://localhost:8080/v1/likes/post/731b0395-4888-4822-b516-05b4b7bf2089/status \
+            -H "Authorization: Bearer tok_user_1"
+
+      - name: Rust E2E contract tests (against docker compose)
+        env:
+          RUN_INTEGRATION: "1"
+          SOCIAL_API_BASE_URL: "http://localhost:8080"
+        run: |
+          cargo test -p social-api --test e2e_http -- --nocapture
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          docker compose ps || true
+          docker compose logs --no-color --tail=300 || true
+
+      - name: Shutdown
+        if: always()
+        run: |
+          docker compose down -v

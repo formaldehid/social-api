@@ -1,0 +1,124 @@
+services:
+  social-api:
+    build:
+      context: .
+      dockerfile: ./services/social-api/Dockerfile
+    environment:
+      DATABASE_URL: postgres://social:social_password@postgres:5432/social_api
+      READ_DATABASE_URL: postgres://social_read_replica:social_password@postgres:5432/social_api
+      REDIS_URL: redis://redis:6379
+      HTTP_PORT: 8080
+      CONTENT_API_POST_URL: http://mock-post-api:8080
+      CONTENT_API_BONUS_HUNTER_URL: http://mock-bonus-hunter-api:8080
+      CONTENT_API_TOP_PICKS_URL: http://mock-top-picks-api:8080
+      PROFILE_API_URL: http://mock-profile-api:8080
+      LOG_LEVEL: info
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-profile-api:
+        condition: service_healthy
+      mock-post-api:
+        condition: service_healthy
+      mock-bonus-hunter-api:
+        condition: service_healthy
+      mock-top-picks-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health/ready || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: social_api
+      POSTGRES_USER: social
+      POSTGRES_PASSWORD: social_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U social -d social_api"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  mock-profile-api:
+    build:
+      context: .
+      dockerfile: ./services/mock-profile-api/Dockerfile
+    environment:
+      LOG_LEVEL: info
+    ports:
+      - "8084:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  mock-post-api:
+    build:
+      context: .
+      dockerfile: ./services/mock-content-api/Dockerfile
+    environment:
+      LOG_LEVEL: info
+      CONTENT_TYPE: post
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  mock-bonus-hunter-api:
+    build:
+      context: .
+      dockerfile: ./services/mock-content-api/Dockerfile
+    environment:
+      LOG_LEVEL: info
+      CONTENT_TYPE: bonus_hunter
+    ports:
+      - "8082:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  mock-top-picks-api:
+    build:
+      context: .
+      dockerfile: ./services/mock-content-api/Dockerfile
+    environment:
+      LOG_LEVEL: info
+      CONTENT_TYPE: top_picks
+    ports:
+      - "8083:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres_data:
