@@ -1,6 +1,6 @@
-# Social API (Rust) — foundation commit
+# Social API (Rust)
 
-This repo is the **first commit** of the Social API assignment: an enterprise-grade Rust microservice foundation that compiles and runs locally and in Docker Compose.
+This repo implements the Social API assignment as an enterprise-grade Rust microservice that runs locally and in Docker Compose.
 
 ## Run (Docker Compose)
 
@@ -28,8 +28,18 @@ curl -s http://localhost:8080/health/ready | jq .
 # Like count (public)
 curl -s http://localhost:8080/v1/likes/post/731b0395-4888-4822-b516-05b4b7bf2089/count | jq .
 
+# Like (requires auth token)
+curl -s -X POST http://localhost:8080/v1/likes \
+  -H "Authorization: Bearer tok_user_1" \
+  -H "Content-Type: application/json" \
+  -d '{"content_type":"post","content_id":"731b0395-4888-4822-b516-05b4b7bf2089"}' | jq .
+
 # Like status (requires auth token)
 curl -s http://localhost:8080/v1/likes/post/731b0395-4888-4822-b516-05b4b7bf2089/status \
+  -H "Authorization: Bearer tok_user_1" | jq .
+
+# Unlike (requires auth token)
+curl -s -X DELETE http://localhost:8080/v1/likes/post/731b0395-4888-4822-b516-05b4b7bf2089 \
   -H "Authorization: Bearer tok_user_1" | jq .
 
 # Metrics
@@ -61,27 +71,31 @@ Adding a new content type in the future is intended to be **configuration-only**
 
 The `/v1/likes/user` endpoint is scaffolded with cursor-based pagination because offset-based pagination becomes slower and inconsistent under concurrent writes. Cursor pagination stays stable and index-friendly as the dataset grows.
 
-## What’s included in this first commit
+## What’s included
 
 * Rust workspace + service skeleton
 * Fail-fast env config + `.env.example`
 * JSON structured logs via `tracing`
 * Request ID propagation + Prometheus metrics at `/metrics`
 * Health checks:
-
   * `/health/live` always 200
   * `/health/ready` checks Postgres (writer+reader), Redis, and that at least one Content API is reachable
 * DB migrations (initial schema + indexes)
 * Dockerfile (multi-stage, non-root runtime) + docker-compose bringing up Postgres, Redis, Social API, and mocks
-* Routes from the spec are registered; write-heavy endpoints are intentionally `501 NOT_IMPLEMENTED` but already return the spec-shaped error envelope
+* Core endpoints implemented:
+  * Like / Unlike (idempotent)
+  * Count (public) + Batch counts (public)
+  * Status (auth) + Batch statuses (auth)
+  * User likes (auth, cursor-based pagination)
 * End-to-end contract tests (Rust) that run against the docker-compose stack (GitHub Actions + local)
 
 ## What comes next (planned)
 
-* Like/unlike write path with idempotency, atomic cache updates, and SSE event publishing
 * Rate limiting (Redis-based) and circuit breaker for external calls
 * Hot-path caching hardening (stampede control, warmup, bounded staleness decisions)
+* Content validation caching
 * Leaderboard implementation (hourly buckets + periodic refresh)
+* SSE event stream (live like/unlike updates)
 * Deeper integration tests (failure injection: Redis down, circuit breaker open)
 * k6 load testing scripts
 
