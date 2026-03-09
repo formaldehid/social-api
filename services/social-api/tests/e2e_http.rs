@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 const POST_ID: &str = "731b0395-4888-4822-b516-05b4b7bf2089";
+const POST_ID_2: &str = "9601c044-6130-4ee5-a155-96570e05a02f";
 
 fn enabled() -> bool {
     std::env::var("RUN_INTEGRATION").ok().as_deref() == Some("1")
@@ -444,6 +445,129 @@ async fn like_unlike_lifecycle_is_idempotent_and_updates_counts() -> Result<()> 
         .json()
         .await?;
     assert_eq!(after.count, un2.count);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn rate_limit_headers_present_on_count() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+
+    let base = base_url();
+    let client = client()?;
+    wait_ready(&client, &base).await?;
+
+    let resp = client
+        .get(format!("{base}/v1/likes/post/{POST_ID}/count"))
+        .send()
+        .await?;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Spec: X-RateLimit-* headers should be included on all responses.
+    for h in [
+        "x-ratelimit-limit",
+        "x-ratelimit-remaining",
+        "x-ratelimit-reset",
+    ] {
+        assert!(
+            resp.headers().get(h).is_some(),
+            "missing rate limit header: {h}"
+        );
+    }
+
+    // Basic sanity: headers should be parseable integers
+    let _limit: u64 = resp
+        .headers()
+        .get("x-ratelimit-limit")
+        .unwrap()
+        .to_str()?
+        .parse()?;
+    let _remaining: u64 = resp
+        .headers()
+        .get("x-ratelimit-remaining")
+        .unwrap()
+        .to_str()?
+        .parse()?;
+    let _reset: u64 = resp
+        .headers()
+        .get("x-ratelimit-reset")
+        .unwrap()
+        .to_str()?
+        .parse()?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn write_rate_limit_returns_429_and_retry_after() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+
+    let base = base_url();
+    let client = client()?;
+    wait_ready(&client, &base).await?;
+
+    // Ensure the test user starts in an "unliked" state even across re-runs.
+    let _ = client
+        .delete(format!("{base}/v1/likes/post/{POST_ID_2}"))
+        .header("Authorization", "Bearer tok_user_5")
+        .send()
+        .await?;
+
+    let like_req = serde_json::json!({"content_type":"post","content_id": POST_ID_2});
+
+    // Default write limit is 30 req/min. We send more than that and expect a 429.
+    let mut saw_429 = false;
+    let mut retry_after_seen = false;
+
+    for _ in 0..40 {
+        let resp = client
+            .post(format!("{base}/v1/likes"))
+            .header("Authorization", "Bearer tok_user_5")
+            .json(&like_req)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let headers = resp.headers().clone();
+
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            saw_429 = true;
+
+            // Verify error envelope + header requirements.
+            let err: ErrorEnvelope = resp.json().await?;
+            assert_eq!(err.error.code, "RATE_LIMITED");
+
+            assert!(
+                headers.get("retry-after").is_some(),
+                "expected Retry-After on 429"
+            );
+            retry_after_seen = true;
+
+            for h in [
+                "x-ratelimit-limit",
+                "x-ratelimit-remaining",
+                "x-ratelimit-reset",
+            ] {
+                assert!(
+                    headers.get(h).is_some(),
+                    "missing rate limit header on 429: {h}"
+                );
+            }
+
+            break;
+        }
+    }
+
+    assert!(
+        saw_429,
+        "expected at least one 429 after exceeding the write rate limit"
+    );
+    assert!(retry_after_seen, "expected Retry-After header on 429");
 
     Ok(())
 }
