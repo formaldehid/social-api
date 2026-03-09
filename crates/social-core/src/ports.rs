@@ -1,4 +1,4 @@
-use crate::domain::{ContentKey, UserIdentity};
+use crate::domain::{ContentKey, LeaderboardWindow, LikeCount, UserIdentity};
 use async_trait::async_trait;
 use thiserror::Error;
 
@@ -58,4 +58,33 @@ pub trait LikeCountsCache: Send + Sync {
     async fn set_count(&self, key: &ContentKey, count: i64) -> Result<(), CacheError>;
     async fn get_counts(&self, keys: &[ContentKey]) -> Result<Vec<Option<i64>>, CacheError>;
     async fn set_counts(&self, items: &[(ContentKey, i64)]) -> Result<(), CacheError>;
+}
+
+/// Backing store for the leaderboard.
+#[async_trait]
+pub trait LeaderboardRepository: Send + Sync {
+    /// Returns the most-liked content items for the given time window.
+    async fn top_liked(
+        &self,
+        window: LeaderboardWindow,
+        content_type: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<LikeCount>, StorageError>;
+}
+
+/// Cache for leaderboard payloads.
+#[async_trait]
+pub trait LeaderboardCache: Send + Sync {
+    async fn get_top_liked(
+        &self,
+        window: LeaderboardWindow,
+        content_type: Option<&str>,
+    ) -> Result<Option<Vec<LikeCount>>, CacheError>;
+
+    async fn set_top_liked(
+        &self,
+        window: LeaderboardWindow,
+        content_type: Option<&str>,
+        items: &[LikeCount],
+    ) -> Result<(), CacheError>;
 }

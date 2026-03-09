@@ -2,21 +2,24 @@ use crate::{
     adapters::{
         external::{content_catalog::HttpContentCatalog, profile_auth::ProfileHttpAuth},
         storage::{
-            pg_like_counts::PgLikeCountsRepository, pg_likes::PgLikesRepository,
-            pg_likes_writer::PgLikesWriter, redis_content_validation::RedisContentValidationCache,
+            pg_leaderboard::PgLeaderboardRepository, pg_like_counts::PgLikeCountsRepository,
+            pg_likes::PgLikesRepository, pg_likes_writer::PgLikesWriter,
+            redis_content_validation::RedisContentValidationCache,
+            redis_leaderboard_cache::RedisLeaderboardCache,
             redis_like_counts::RedisLikeCountsCache, redis_rate_limiter::RedisRateLimiter,
         },
     },
     infra::{config::Settings, metrics::Metrics},
 };
 use social_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-use social_core::usecases::LikeCountsService;
+use social_core::usecases::{LeaderboardService, LikeCountsService};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
 use url::Url;
 
 pub type LikeCountsSvc = LikeCountsService<RedisLikeCountsCache, PgLikeCountsRepository>;
+pub type LeaderboardSvc = LeaderboardService<RedisLeaderboardCache, PgLeaderboardRepository>;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -36,6 +39,10 @@ pub struct AppState {
     pub likes_repo: PgLikesRepository,
     pub likes_writer: PgLikesWriter,
     pub rate_limiter: RedisRateLimiter,
+
+    pub leaderboard: LeaderboardSvc,
+    pub leaderboard_cache: RedisLeaderboardCache,
+    pub leaderboard_repo: PgLeaderboardRepository,
 }
 
 impl AppState {
@@ -122,6 +129,19 @@ impl AppState {
         let likes_repo = PgLikesRepository::new(db_reader.clone());
         let likes_writer = PgLikesWriter::new(db_writer.clone());
 
+        let leaderboard_ttl_secs = settings
+            .leaderboard_refresh_interval_secs
+            .saturating_mul(2)
+            .max(5);
+        let leaderboard_cache = RedisLeaderboardCache::new(
+            redis.clone(),
+            Duration::from_secs(leaderboard_ttl_secs),
+            metrics.clone(),
+        );
+        let leaderboard_repo = PgLeaderboardRepository::new(db_reader.clone());
+        let leaderboard =
+            LeaderboardService::new(leaderboard_cache.clone(), leaderboard_repo.clone());
+
         Ok(Self {
             settings,
             db_writer,
@@ -137,6 +157,9 @@ impl AppState {
             likes_repo,
             likes_writer,
             rate_limiter,
+            leaderboard,
+            leaderboard_cache,
+            leaderboard_repo,
         })
     }
 }

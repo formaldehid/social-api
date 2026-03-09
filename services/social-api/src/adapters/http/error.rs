@@ -107,6 +107,16 @@ impl ApiError {
         )
     }
 
+    pub fn invalid_window(window: &str, request_id: String) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_WINDOW",
+            "Time window not in [24h, 7d, 30d, all]",
+            request_id,
+        )
+        .with_details(serde_json::json!({ "window": window }))
+    }
+
     pub fn dependency_unavailable(message: impl Into<String>, request_id: String) -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,

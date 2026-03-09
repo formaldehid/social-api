@@ -13,6 +13,7 @@ services:
       CONTENT_API_TOP_PICKS_URL: http://mock-top-picks-api:8080
       PROFILE_API_URL: http://mock-profile-api:8080
       LOG_LEVEL: info
+      LEADERBOARD_REFRESH_INTERVAL_SECS: 60
     ports:
       - "8080:8080"
     depends_on:
