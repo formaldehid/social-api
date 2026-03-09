@@ -3,7 +3,7 @@ use crate::{
         external::{content_catalog::HttpContentCatalog, profile_auth::ProfileHttpAuth},
         storage::{
             pg_like_counts::PgLikeCountsRepository, pg_likes::PgLikesRepository,
-            redis_like_counts::RedisLikeCountsCache,
+            pg_likes_writer::PgLikesWriter, redis_like_counts::RedisLikeCountsCache,
         },
     },
     infra::{config::Settings, metrics::Metrics},
@@ -30,7 +30,9 @@ pub struct AppState {
     pub content_catalog: HttpContentCatalog,
 
     pub like_counts: LikeCountsSvc,
+    pub like_counts_cache: RedisLikeCountsCache,
     pub likes_repo: PgLikesRepository,
+    pub likes_writer: PgLikesWriter,
 }
 
 impl AppState {
@@ -82,9 +84,10 @@ impl AppState {
             metrics.clone(),
         );
         let counts_repo = PgLikeCountsRepository::new(db_reader.clone());
-        let like_counts = LikeCountsService::new(counts_cache, counts_repo);
+        let like_counts = LikeCountsService::new(counts_cache.clone(), counts_repo);
 
         let likes_repo = PgLikesRepository::new(db_reader.clone());
+        let likes_writer = PgLikesWriter::new(db_writer.clone());
 
         Ok(Self {
             settings,
@@ -97,7 +100,9 @@ impl AppState {
             auth,
             content_catalog,
             like_counts,
+            like_counts_cache: counts_cache,
             likes_repo,
+            likes_writer,
         })
     }
 }

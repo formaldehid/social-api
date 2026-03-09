@@ -75,6 +75,19 @@ impl ApiError {
         .with_details(serde_json::json!({ "content_id": content_id }))
     }
 
+    pub fn content_not_found(content_type: &str, content_id: &str, request_id: String) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "CONTENT_NOT_FOUND",
+            "Content item does not exist or has been removed",
+            request_id,
+        )
+        .with_details(serde_json::json!({
+            "content_type": content_type,
+            "content_id": content_id
+        }))
+    }
+
     pub fn batch_too_large(max: usize, request_id: String) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,

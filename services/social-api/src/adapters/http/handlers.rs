@@ -8,6 +8,7 @@ use axum::{
 };
 use social_core::domain::ContentKey;
 use social_core::ports::AuthProvider;
+use social_core::ports::ContentCatalog;
 use uuid::{Uuid, Version};
 
 pub async fn health_live() -> Json<HealthLiveResponse> {
@@ -197,6 +198,9 @@ pub async fn get_like_status(
     let content_id = parse_uuid_v4(&content_id, request_id.clone())?;
     let user = authenticate(&state, &headers, request_id.clone()).await?;
 
+    // Fill request span user_id (for logs) once we have it.
+    tracing::Span::current().record("user_id", user.user_id.as_str());
+
     let key = ContentKey {
         content_type,
         content_id,
@@ -234,6 +238,8 @@ pub async fn batch_like_statuses(
     }
 
     let user = authenticate(&state, &headers, request_id.clone()).await?;
+
+    tracing::Span::current().record("user_id", user.user_id.as_str());
 
     let mut keys = Vec::with_capacity(req.items.len());
     for item in &req.items {
@@ -283,6 +289,8 @@ pub async fn get_user_likes(
 ) -> Result<Json<UserLikesResponse>, ApiError> {
     let request_id = request_id(&headers);
     let user = authenticate(&state, &headers, request_id.clone()).await?;
+
+    tracing::Span::current().record("user_id", user.user_id.as_str());
 
     if let Some(ref ct) = q.content_type {
         ensure_content_type_known(&state, ct, request_id.clone())?;
@@ -334,20 +342,173 @@ pub async fn get_user_likes(
     }))
 }
 
-pub async fn like(headers: HeaderMap) -> Result<Response, ApiError> {
+pub async fn like(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<LikeRequest>,
+) -> Result<Response, ApiError> {
     let request_id = request_id(&headers);
-    Err(ApiError::not_implemented(
-        "Like/unlike will be implemented in the next commit (DB + Redis atomic updates)",
-        request_id,
-    ))
+
+    ensure_content_type_known(&state, &req.content_type, request_id.clone())?;
+    let content_id = parse_uuid_v4(&req.content_id, request_id.clone())?;
+
+    let user = authenticate(&state, &headers, request_id.clone()).await?;
+    tracing::Span::current().record("user_id", user.user_id.as_str());
+
+    let key = ContentKey {
+        content_type: req.content_type.clone(),
+        content_id,
+    };
+
+    // Validate content exists (required by spec)
+    match state.content_catalog.exists(&key).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(ApiError::content_not_found(
+                &req.content_type,
+                &req.content_id,
+                request_id,
+            ));
+        }
+        Err(e) => {
+            return Err(match e {
+                social_core::ports::ContentError::UnknownContentType(ct) => {
+                    ApiError::content_type_unknown(&ct, request_id)
+                }
+                social_core::ports::ContentError::DependencyUnavailable(msg) => {
+                    ApiError::dependency_unavailable(msg, request_id)
+                }
+            })
+        }
+    }
+
+    let res = state
+        .likes_writer
+        .like(&user.user_id, &key)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                service = "social-api",
+                request_id = %request_id,
+                error_type = "db",
+                error_message = %e,
+                "failed to like"
+            );
+            ApiError::dependency_unavailable("database unavailable", request_id.clone())
+        })?;
+
+    // Update cached count atomically (best-effort).
+    if let Err(e) = state
+        .like_counts_cache
+        .set_count_cas(&key, res.count, res.seq)
+        .await
+    {
+        tracing::warn!(
+            service = "social-api",
+            request_id = %request_id,
+            error_type = "cache",
+            error_message = %e,
+            "failed to update like count cache"
+        );
+    }
+
+    state
+        .metrics
+        .likes_total
+        .with_label_values(&[&req.content_type, &"like".to_string()])
+        .inc();
+
+    let body = LikeResponse {
+        liked: true,
+        already_existed: res.already_existed,
+        count: res.count,
+        liked_at: res.liked_at,
+    };
+
+    Ok((StatusCode::CREATED, Json(body)).into_response())
 }
 
-pub async fn unlike(headers: HeaderMap) -> Result<Response, ApiError> {
+pub async fn unlike(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((content_type, content_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
     let request_id = request_id(&headers);
-    Err(ApiError::not_implemented(
-        "Like/unlike will be implemented in the next commit (DB + Redis atomic updates)",
-        request_id,
-    ))
+
+    ensure_content_type_known(&state, &content_type, request_id.clone())?;
+    let id = parse_uuid_v4(&content_id, request_id.clone())?;
+
+    let user = authenticate(&state, &headers, request_id.clone()).await?;
+    tracing::Span::current().record("user_id", user.user_id.as_str());
+
+    let key = ContentKey {
+        content_type: content_type.clone(),
+        content_id: id,
+    };
+
+    match state.content_catalog.exists(&key).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(ApiError::content_not_found(
+                &content_type,
+                &content_id,
+                request_id,
+            ));
+        }
+        Err(e) => {
+            return Err(match e {
+                social_core::ports::ContentError::UnknownContentType(ct) => {
+                    ApiError::content_type_unknown(&ct, request_id)
+                }
+                social_core::ports::ContentError::DependencyUnavailable(msg) => {
+                    ApiError::dependency_unavailable(msg, request_id)
+                }
+            })
+        }
+    }
+
+    let res = state
+        .likes_writer
+        .unlike(&user.user_id, &key)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                service = "social-api",
+                request_id = %request_id,
+                error_type = "db",
+                error_message = %e,
+                "failed to unlike"
+            );
+            ApiError::dependency_unavailable("database unavailable", request_id.clone())
+        })?;
+
+    if let Err(e) = state
+        .like_counts_cache
+        .set_count_cas(&key, res.count, res.seq)
+        .await
+    {
+        tracing::warn!(
+            service = "social-api",
+            request_id = %request_id,
+            error_type = "cache",
+            error_message = %e,
+            "failed to update like count cache"
+        );
+    }
+
+    state
+        .metrics
+        .likes_total
+        .with_label_values(&[&content_type, &"unlike".to_string()])
+        .inc();
+
+    let body = UnlikeResponse {
+        liked: false,
+        was_liked: res.was_liked,
+        count: res.count,
+    };
+
+    Ok((StatusCode::OK, Json(body)).into_response())
 }
 
 pub async fn top_liked(

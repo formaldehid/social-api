@@ -55,6 +55,21 @@ struct StatusResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct LikeResponse {
+    liked: bool,
+    already_existed: bool,
+    count: i64,
+    liked_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UnlikeResponse {
+    liked: bool,
+    was_liked: bool,
+    count: i64,
+}
+
+#[derive(Debug, Deserialize)]
 struct UserLikesResponse {
     items: Vec<UserLikeItem>,
     next_cursor: Option<String>,
@@ -292,10 +307,10 @@ async fn status_requires_auth_and_valid_token() -> Result<()> {
     assert_eq!(err.error.code, "UNAUTHORIZED");
     assert_eq!(err.error.request_id, request_id);
 
-    // Valid token -> 200 liked=false for fresh DB
+    // Valid token -> 200 liked=false for a user that hasn't liked this item
     let resp = client
         .get(format!("{base}/v1/likes/post/{POST_ID}/status"))
-        .header("Authorization", "Bearer tok_user_1")
+        .header("Authorization", "Bearer tok_user_2")
         .send()
         .await?;
 
@@ -319,7 +334,7 @@ async fn user_likes_empty_for_fresh_db() -> Result<()> {
 
     let resp = client
         .get(format!("{base}/v1/likes/user"))
-        .header("Authorization", "Bearer tok_user_1")
+        .header("Authorization", "Bearer tok_user_2")
         .send()
         .await?;
 
@@ -333,7 +348,7 @@ async fn user_likes_empty_for_fresh_db() -> Result<()> {
 }
 
 #[tokio::test]
-async fn like_endpoint_is_not_implemented_but_returns_spec_error_shape() -> Result<()> {
+async fn like_unlike_lifecycle_is_idempotent_and_updates_counts() -> Result<()> {
     if !enabled() {
         return Ok(());
     }
@@ -342,28 +357,93 @@ async fn like_endpoint_is_not_implemented_but_returns_spec_error_shape() -> Resu
     let client = client()?;
     wait_ready(&client, &base).await?;
 
-    let request_id = "req_like_not_impl";
-    let req = serde_json::json!({"content_type":"post","content_id": POST_ID});
-
-    let resp = client
-        .post(format!("{base}/v1/likes"))
-        .header("x-request-id", request_id)
+    // Ensure the test user starts in an "unliked" state even across re-runs.
+    let _ = client
+        .delete(format!("{base}/v1/likes/post/{POST_ID}"))
         .header("Authorization", "Bearer tok_user_1")
-        .json(&req)
         .send()
         .await?;
 
-    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
-    let err: ErrorEnvelope = resp.json().await?;
-    assert_eq!(err.error.code, "NOT_IMPLEMENTED");
-    assert_eq!(err.error.request_id, request_id);
-    assert!(
-        err.error
-            .message
-            .to_ascii_lowercase()
-            .contains("next commit"),
-        "message should explain scaffolding"
-    );
+    // baseline count
+    let before: CountResponse = client
+        .get(format!("{base}/v1/likes/post/{POST_ID}/count"))
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    // Like 1 -> should increment count by 1 and return 201
+    let like_req = serde_json::json!({"content_type":"post","content_id": POST_ID});
+    let resp = client
+        .post(format!("{base}/v1/likes"))
+        .header("Authorization", "Bearer tok_user_1")
+        .json(&like_req)
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let like1: LikeResponse = resp.json().await?;
+    assert!(like1.liked);
+    assert!(!like1.already_existed);
+    assert_eq!(like1.count, before.count + 1);
+    assert!(!like1.liked_at.is_empty());
+
+    // Like 2 (idempotent) -> count unchanged, already_existed=true
+    let resp = client
+        .post(format!("{base}/v1/likes"))
+        .header("Authorization", "Bearer tok_user_1")
+        .json(&like_req)
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let like2: LikeResponse = resp.json().await?;
+    assert!(like2.liked);
+    assert!(like2.already_existed);
+    assert_eq!(like2.count, like1.count);
+    assert_eq!(like2.liked_at, like1.liked_at);
+
+    // Status should now be liked
+    let status: StatusResponse = client
+        .get(format!("{base}/v1/likes/post/{POST_ID}/status"))
+        .header("Authorization", "Bearer tok_user_1")
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert!(status.liked);
+    assert!(status.liked_at.is_some());
+
+    // Unlike 1 -> decrement count by 1
+    let resp = client
+        .delete(format!("{base}/v1/likes/post/{POST_ID}"))
+        .header("Authorization", "Bearer tok_user_1")
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let un1: UnlikeResponse = resp.json().await?;
+    assert!(!un1.liked);
+    assert!(un1.was_liked);
+    assert_eq!(un1.count, like1.count - 1);
+
+    // Unlike 2 (idempotent) -> count unchanged, was_liked=false
+    let resp = client
+        .delete(format!("{base}/v1/likes/post/{POST_ID}"))
+        .header("Authorization", "Bearer tok_user_1")
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let un2: UnlikeResponse = resp.json().await?;
+    assert!(!un2.liked);
+    assert!(!un2.was_liked);
+    assert_eq!(un2.count, un1.count);
+
+    // Count endpoint should match
+    let after: CountResponse = client
+        .get(format!("{base}/v1/likes/post/{POST_ID}/count"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(after.count, un2.count);
 
     Ok(())
 }

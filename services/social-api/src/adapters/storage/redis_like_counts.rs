@@ -25,6 +25,91 @@ impl RedisLikeCountsCache {
             content.content_type, content.content_id
         )
     }
+
+    fn encode_value(seq: i64, count: i64) -> String {
+        format!("{seq}|{count}")
+    }
+
+    fn decode_value(raw: &str) -> Option<(i64, i64)> {
+        // Backward compatible with early versions that stored just the count.
+        if let Some((seq_s, count_s)) = raw.split_once('|') {
+            let seq = seq_s.parse::<i64>().ok()?;
+            let count = count_s.parse::<i64>().ok()?;
+            return Some((seq, count));
+        }
+
+        // Legacy format: only count.
+        let count = raw.parse::<i64>().ok()?;
+        Some((0, count))
+    }
+
+    /// Best-effort CAS update used by the write path.
+    ///
+    /// Stores the value as `"{seq}|{count}"` and only overwrites when `seq` is newer
+    /// than (or equal to) the cached seq.
+    pub async fn set_count_cas(
+        &self,
+        key: &ContentKey,
+        count: i64,
+        seq: i64,
+    ) -> Result<bool, CacheError> {
+        // Lua script: compare cached seq and set only if incoming seq is newer.
+        // Returns 1 if updated, 0 if skipped.
+        const LUA: &str = r#"
+local current = redis.call('GET', KEYS[1])
+local incoming_seq = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[3])
+
+if current then
+  local sep = string.find(current, '|')
+  if sep then
+    local cur_seq = tonumber(string.sub(current, 1, sep - 1)) or 0
+    if cur_seq > incoming_seq then
+      return 0
+    end
+  else
+    -- legacy format: treat as seq=0
+    local cur_seq = 0
+    if cur_seq > incoming_seq then
+      return 0
+    end
+  end
+end
+
+redis.call('SETEX', KEYS[1], ttl, ARGV[1] .. '|' .. ARGV[2])
+return 1
+"#;
+
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Unavailable(e.to_string()))?;
+
+        let redis_key = Self::key_for(key);
+        let ttl_secs: u64 = self.ttl.as_secs();
+
+        let script = redis::Script::new(LUA);
+        let res: i32 = script
+            .key(redis_key)
+            .arg(seq)
+            .arg(count)
+            .arg(ttl_secs)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| {
+                self.metrics.cache_error("cas_set");
+                CacheError::Unavailable(e.to_string())
+            })?;
+
+        if res == 1 {
+            self.metrics.cache_hit("cas_set");
+            Ok(true)
+        } else {
+            self.metrics.cache_miss("cas_set");
+            Ok(false)
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -43,10 +128,17 @@ impl LikeCountsCache for RedisLikeCountsCache {
         })?;
 
         match val {
-            Some(s) => {
-                self.metrics.cache_hit("get");
-                Ok(s.parse::<i64>().ok())
-            }
+            Some(s) => match Self::decode_value(&s) {
+                Some((_seq, count)) => {
+                    self.metrics.cache_hit("get");
+                    Ok(Some(count))
+                }
+                None => {
+                    // Malformed cache value -> treat as miss.
+                    self.metrics.cache_miss("get");
+                    Ok(None)
+                }
+            },
             None => {
                 self.metrics.cache_miss("get");
                 Ok(None)
@@ -63,8 +155,17 @@ impl LikeCountsCache for RedisLikeCountsCache {
 
         let redis_key = Self::key_for(key);
         let ttl_secs: u64 = self.ttl.as_secs();
-        let _: () = conn
-            .set_ex(redis_key, count.to_string(), ttl_secs)
+        // Cache warming on read-miss must not overwrite a concurrently updated value.
+        // We store `seq=0` for warmed entries.
+        // NOTE: `SET ... NX` is used to avoid overwriting a newer value.
+        let val = Self::encode_value(0, count);
+        let _: Option<String> = redis::cmd("SET")
+            .arg(redis_key)
+            .arg(val)
+            .arg("EX")
+            .arg(ttl_secs)
+            .arg("NX")
+            .query_async(&mut conn)
             .await
             .map_err(|e| {
                 self.metrics.cache_error("set");
@@ -99,7 +200,7 @@ impl LikeCountsCache for RedisLikeCountsCache {
 
         Ok(vals
             .into_iter()
-            .map(|opt| opt.and_then(|s| s.parse::<i64>().ok()))
+            .map(|opt| opt.and_then(|s| Self::decode_value(&s).map(|(_seq, c)| c)))
             .collect())
     }
 
@@ -113,14 +214,17 @@ impl LikeCountsCache for RedisLikeCountsCache {
         let ttl_secs = self.ttl.as_secs() as usize;
         let mut pipe = redis::pipe();
         for (k, count) in items {
-            pipe.cmd("SETEX")
+            // Like set_count(): warm cache without overwriting newer values.
+            pipe.cmd("SET")
                 .arg(Self::key_for(k))
+                .arg(Self::encode_value(0, *count))
+                .arg("EX")
                 .arg(ttl_secs)
-                .arg(count.to_string())
+                .arg("NX")
                 .ignore();
         }
 
-        pipe.query_async::<String>(&mut conn).await.map_err(|e| {
+        pipe.query_async::<()>(&mut conn).await.map_err(|e| {
             self.metrics.cache_error("setex");
             CacheError::Unavailable(e.to_string())
         })?;
