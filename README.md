@@ -89,11 +89,15 @@ The `/v1/likes/user` endpoint is scaffolded with cursor-based pagination because
   * User likes (auth, cursor-based pagination)
 * End-to-end contract tests (Rust) that run against the docker-compose stack (GitHub Actions + local)
 
+Additional production hardening already implemented:
+
+* Redis-backed rate limiting middleware with required `X-RateLimit-*` headers + `Retry-After` on 429
+* Circuit breaker state machine (closed/half-open/open) around external calls
+* Redis caching of content validation results (content existence) to reduce dependency pressure
+
 ## What comes next (planned)
 
-* Rate limiting (Redis-based) and circuit breaker for external calls
 * Hot-path caching hardening (stampede control, warmup, bounded staleness decisions)
-* Content validation caching
 * Leaderboard implementation (hourly buckets + periodic refresh)
 * SSE event stream (live like/unlike updates)
 * Deeper integration tests (failure injection: Redis down, circuit breaker open)
