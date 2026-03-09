@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use social_core::domain::ContentKey;
+use social_core::domain::{ContentKey, LeaderboardWindow};
 use social_core::ports::AuthProvider;
 use social_core::ports::ContentCatalog;
 use uuid::{Uuid, Version};
@@ -512,14 +512,52 @@ pub async fn unlike(
 }
 
 pub async fn top_liked(
+    State(state): State<AppState>,
     headers: HeaderMap,
-    Query(_q): Query<TopLikedQuery>,
-) -> Result<Response, ApiError> {
+    Query(q): Query<TopLikedQuery>,
+) -> Result<Json<TopLikedResponse>, ApiError> {
     let request_id = request_id(&headers);
-    Err(ApiError::not_implemented(
-        "Leaderboard endpoint will be implemented after write path + hourly buckets.",
-        request_id,
-    ))
+
+    if let Some(ref ct) = q.content_type {
+        ensure_content_type_known(&state, ct, request_id.clone())?;
+    }
+
+    // Default window: 24h (sensible for a "trending" leaderboard).
+    let window_raw = q.window.as_deref().unwrap_or("24h");
+    let window = LeaderboardWindow::parse(window_raw)
+        .ok_or_else(|| ApiError::invalid_window(window_raw, request_id.clone()))?;
+
+    let limit = q.limit.unwrap_or(10).clamp(1, 50);
+
+    let items = state
+        .leaderboard
+        .get_top_liked(window, q.content_type.as_deref(), limit)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                service = "social-api",
+                request_id = %request_id,
+                error_type = "leaderboard",
+                error_message = %e,
+                "failed to get leaderboard"
+            );
+            ApiError::dependency_unavailable("leaderboard storage unavailable", request_id.clone())
+        })?;
+
+    let items = items
+        .into_iter()
+        .map(|i| TopLikedItem {
+            content_type: i.content_type,
+            content_id: i.content_id,
+            count: i.count,
+        })
+        .collect();
+
+    Ok(Json(TopLikedResponse {
+        window: window.as_str().to_string(),
+        content_type: q.content_type,
+        items,
+    }))
 }
 
 pub async fn stream(headers: HeaderMap) -> Result<Response, ApiError> {

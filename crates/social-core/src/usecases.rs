@@ -1,6 +1,9 @@
 use crate::{
-    domain::ContentKey,
-    ports::{CacheError, LikeCountsCache, LikeCountsRepository, StorageError},
+    domain::{ContentKey, LeaderboardWindow, LikeCount},
+    ports::{
+        CacheError, LeaderboardCache, LeaderboardRepository, LikeCountsCache, LikeCountsRepository,
+        StorageError,
+    },
 };
 use thiserror::Error;
 
@@ -113,4 +116,80 @@ fn to_map(items: Vec<(ContentKey, i64)>) -> std::collections::HashMap<ContentKey
 fn project_in_order(keys: &[ContentKey], items: Vec<(ContentKey, i64)>) -> Vec<i64> {
     let map = to_map(items);
     keys.iter().map(|k| *map.get(k).unwrap_or(&0)).collect()
+}
+
+const LEADERBOARD_MAX_LIMIT: u32 = 50;
+
+#[derive(Debug, Error)]
+pub enum LeaderboardError {
+    #[error("storage unavailable")]
+    StorageUnavailable,
+    #[error("unexpected error")]
+    Unexpected,
+}
+
+impl From<StorageError> for LeaderboardError {
+    fn from(e: StorageError) -> Self {
+        match e {
+            StorageError::Unavailable(_) => LeaderboardError::StorageUnavailable,
+            StorageError::Unexpected(_) => LeaderboardError::Unexpected,
+        }
+    }
+}
+
+/// Leaderboard use-cases.
+///
+/// - Read path prefers Redis cache.
+/// - If Redis is unavailable or empty (cold start), falls back to Postgres hourly buckets / counts.
+/// - Cache is filled best-effort.
+///
+/// The cache stores the *top 50* for each `{window, content_type}` combination and responses are
+/// sliced to the requested `limit`.
+#[derive(Clone)]
+pub struct LeaderboardService<C, R> {
+    cache: C,
+    repo: R,
+}
+
+impl<C, R> LeaderboardService<C, R>
+where
+    C: LeaderboardCache,
+    R: LeaderboardRepository,
+{
+    pub fn new(cache: C, repo: R) -> Self {
+        Self { cache, repo }
+    }
+
+    pub async fn get_top_liked(
+        &self,
+        window: LeaderboardWindow,
+        content_type: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<LikeCount>, LeaderboardError> {
+        let limit = limit.clamp(1, LEADERBOARD_MAX_LIMIT);
+
+        match self.cache.get_top_liked(window, content_type).await {
+            Ok(Some(mut items)) => {
+                items.truncate(limit as usize);
+                return Ok(items);
+            }
+            Ok(None) => {
+                // cache miss -> DB
+            }
+            Err(_e) => {
+                // cache error -> degraded mode
+            }
+        }
+
+        let items = self
+            .repo
+            .top_liked(window, content_type, LEADERBOARD_MAX_LIMIT)
+            .await?;
+
+        let _ = self.cache.set_top_liked(window, content_type, &items).await; // best-effort
+
+        let mut out = items;
+        out.truncate(limit as usize);
+        Ok(out)
+    }
 }
