@@ -3,12 +3,13 @@ use crate::{
         external::{content_catalog::HttpContentCatalog, profile_auth::ProfileHttpAuth},
         storage::{
             pg_like_counts::PgLikeCountsRepository, pg_likes::PgLikesRepository,
-            pg_likes_writer::PgLikesWriter, redis_like_counts::RedisLikeCountsCache,
-            redis_rate_limiter::RedisRateLimiter,
+            pg_likes_writer::PgLikesWriter, redis_content_validation::RedisContentValidationCache,
+            redis_like_counts::RedisLikeCountsCache, redis_rate_limiter::RedisRateLimiter,
         },
     },
     infra::{config::Settings, metrics::Metrics},
 };
+use social_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use social_core::usecases::LikeCountsService;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::time::Duration;
@@ -71,24 +72,52 @@ impl AppState {
 
         let content_registry = Arc::new(settings.content_api_urls.clone());
 
+        // Circuit breaker config is shared across all external services.
+        let cb_cfg = CircuitBreakerConfig {
+            failure_threshold: settings.circuit_breaker_failure_threshold as u32,
+            recovery_timeout: Duration::from_secs(settings.circuit_breaker_recovery_timeout_secs),
+            success_threshold: settings.circuit_breaker_success_threshold as u32,
+            failure_rate_window: Duration::from_secs(30),
+        };
+
+        // Per-service circuit breakers.
+        let profile_cb = CircuitBreaker::new(cb_cfg.clone());
+
+        let mut content_breakers = HashMap::new();
+        for ct in content_registry.keys() {
+            content_breakers.insert(ct.clone(), CircuitBreaker::new(cb_cfg.clone()));
+        }
+        let content_breakers = Arc::new(content_breakers);
+
+        // Content validation cache.
+        let content_validation_cache = RedisContentValidationCache::new(
+            redis.clone(),
+            Duration::from_secs(settings.cache_ttl_content_validation_secs),
+            metrics.clone(),
+        );
+
         let auth = ProfileHttpAuth::new(
             settings.profile_api_url.clone(),
             http_client.clone(),
             metrics.clone(),
+            profile_cb,
+            "profile_api",
         );
         let content_catalog = HttpContentCatalog::new(
             content_registry.clone(),
             http_client.clone(),
             metrics.clone(),
+            content_validation_cache,
+            content_breakers,
         );
 
-        let counts_cache = RedisLikeCountsCache::new(
+        let like_counts_cache = RedisLikeCountsCache::new(
             redis.clone(),
             Duration::from_secs(settings.cache_ttl_like_counts_secs),
             metrics.clone(),
         );
         let counts_repo = PgLikeCountsRepository::new(db_reader.clone());
-        let like_counts = LikeCountsService::new(counts_cache.clone(), counts_repo);
+        let like_counts = LikeCountsService::new(like_counts_cache.clone(), counts_repo);
 
         let likes_repo = PgLikesRepository::new(db_reader.clone());
         let likes_writer = PgLikesWriter::new(db_writer.clone());
@@ -104,7 +133,7 @@ impl AppState {
             auth,
             content_catalog,
             like_counts,
-            like_counts_cache: counts_cache,
+            like_counts_cache,
             likes_repo,
             likes_writer,
             rate_limiter,
