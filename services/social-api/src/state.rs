@@ -4,6 +4,7 @@ use crate::{
         storage::{
             pg_like_counts::PgLikeCountsRepository, pg_likes::PgLikesRepository,
             pg_likes_writer::PgLikesWriter, redis_like_counts::RedisLikeCountsCache,
+            redis_rate_limiter::RedisRateLimiter,
         },
     },
     infra::{config::Settings, metrics::Metrics},
@@ -33,6 +34,7 @@ pub struct AppState {
     pub like_counts_cache: RedisLikeCountsCache,
     pub likes_repo: PgLikesRepository,
     pub likes_writer: PgLikesWriter,
+    pub rate_limiter: RedisRateLimiter,
 }
 
 impl AppState {
@@ -64,6 +66,8 @@ impl AppState {
         let mut redis_cfg = deadpool_redis::Config::from_url(settings.redis_url.clone());
         redis_cfg.pool = Some(deadpool_redis::PoolConfig::new(settings.redis_pool_size));
         let redis = redis_cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
+
+        let rate_limiter = RedisRateLimiter::new(redis.clone(), metrics.clone());
 
         let content_registry = Arc::new(settings.content_api_urls.clone());
 
@@ -103,6 +107,7 @@ impl AppState {
             like_counts_cache: counts_cache,
             likes_repo,
             likes_writer,
+            rate_limiter,
         })
     }
 }

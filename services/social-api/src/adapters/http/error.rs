@@ -124,6 +124,15 @@ impl ApiError {
             request_id,
         )
     }
+
+    pub fn rate_limited(request_id: String) -> Self {
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "Rate limit exceeded",
+            request_id,
+        )
+    }
 }
 
 impl IntoResponse for ApiError {

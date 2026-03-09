@@ -15,6 +15,7 @@ use tower_http::{
 pub fn router(state: AppState) -> Router {
     let request_id_header = axum::http::HeaderName::from_static("x-request-id");
     let metrics = state.metrics.clone();
+    let rate_limit_state = state.clone();
 
     let routes: Router = Router::new()
         .route("/health/live", get(handlers::health_live))
@@ -42,6 +43,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/likes/top", get(handlers::top_liked))
         .route("/v1/likes/stream", get(handlers::stream))
         .with_state(state)
+        // Rate limiting (shared Redis state). Applied after matching so it can use `MatchedPath`.
+        .route_layer(axum::middleware::from_fn_with_state(
+            rate_limit_state,
+            middleware::rate_limit::enforce,
+        ))
         // Applied after matching, so it can use `MatchedPath` for low-cardinality metrics + logs.
         .route_layer(
             TraceLayer::new_for_http()

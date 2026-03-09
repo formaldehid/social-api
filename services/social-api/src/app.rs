@@ -22,7 +22,11 @@ pub async fn run() -> Result<()> {
     info!(%addr, "starting social-api");
 
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
