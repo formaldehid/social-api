@@ -5,4 +5,5 @@ pub mod pg_likes_writer;
 pub mod redis_content_validation;
 pub mod redis_leaderboard_cache;
 pub mod redis_like_counts;
+pub mod redis_like_events;
 pub mod redis_rate_limiter;

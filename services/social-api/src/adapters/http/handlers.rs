@@ -1,4 +1,5 @@
 use super::{error::ApiError, types::*};
+use crate::adapters::storage::redis_like_events::LikeStreamEvent;
 use crate::state::AppState;
 use axum::{
     extract::{Path, Query, State},
@@ -6,9 +7,14 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use chrono::Utc;
+use futures::stream;
 use social_core::domain::{ContentKey, LeaderboardWindow};
 use social_core::ports::AuthProvider;
 use social_core::ports::ContentCatalog;
+use std::convert::Infallible;
+use std::sync::Arc;
+use std::time::Duration;
 use uuid::{Uuid, Version};
 
 pub async fn health_live() -> Json<HealthLiveResponse> {
@@ -418,6 +424,22 @@ pub async fn like(
         .with_label_values(&[&req.content_type, &"like".to_string()])
         .inc();
 
+    // Publish SSE event only when the like actually changed state.
+    if !res.already_existed {
+        let ev = LikeStreamEvent::like(&user.user_id, res.count, res.liked_at);
+        if let Err(e) = state.like_events.publish(&key, &ev).await {
+            tracing::warn!(
+                service = "social-api",
+                request_id = %request_id,
+                content_type = %key.content_type,
+                content_id = %key.content_id,
+                error_type = "sse_publish",
+                error_message = %e,
+                "failed to publish like event"
+            );
+        }
+    }
+
     let body = LikeResponse {
         liked: true,
         already_existed: res.already_existed,
@@ -502,6 +524,22 @@ pub async fn unlike(
         .with_label_values(&[&content_type, &"unlike".to_string()])
         .inc();
 
+    // Publish SSE event only when an unlike actually removed a like.
+    if res.was_liked {
+        let ev = LikeStreamEvent::unlike(&user.user_id, res.count, Utc::now());
+        if let Err(e) = state.like_events.publish(&key, &ev).await {
+            tracing::warn!(
+                service = "social-api",
+                request_id = %request_id,
+                content_type = %key.content_type,
+                content_id = %key.content_id,
+                error_type = "sse_publish",
+                error_message = %e,
+                "failed to publish unlike event"
+            );
+        }
+    }
+
     let body = UnlikeResponse {
         liked: false,
         was_liked: res.was_liked,
@@ -560,12 +598,171 @@ pub async fn top_liked(
     }))
 }
 
-pub async fn stream(headers: HeaderMap) -> Result<Response, ApiError> {
+pub async fn stream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<StreamQuery>,
+) -> Result<Response, ApiError> {
     let request_id = request_id(&headers);
-    Err(ApiError::not_implemented(
-        "SSE stream will be implemented after event bus adapter is in place.",
-        request_id,
-    ))
+
+    ensure_content_type_known(&state, &q.content_type, request_id.clone())?;
+    let content_id = parse_uuid_v4(&q.content_id, request_id.clone())?;
+
+    let key = ContentKey {
+        content_type: q.content_type,
+        content_id,
+    };
+
+    let client_ip = client_ip(&headers);
+    tracing::info!(
+        service = "social-api",
+        request_id = %request_id,
+        client_ip = %client_ip,
+        content_type = %key.content_type,
+        content_id = %key.content_id,
+        "sse connected"
+    );
+
+    // Bounded buffer to protect the process from slow clients.
+    // If the client can't keep up, we drop events rather than growing memory.
+    const SSE_BUFFER: usize = 128;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(SSE_BUFFER);
+
+    // Track active connections.
+    state.metrics.sse_connections_active.inc();
+    let guard = SseConnectionGuard::new(state.metrics.clone(), request_id.clone(), client_ip, &key);
+
+    // Subscribe to Redis PubSub channel for this content item.
+    let _subscriber_task = state
+        .like_events
+        .spawn_subscriber(key.clone(), tx.clone(), request_id.clone())
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                service = "social-api",
+                request_id = %request_id,
+                content_type = %key.content_type,
+                content_id = %key.content_id,
+                error_type = "sse_pubsub",
+                error_message = %e,
+                "failed to initialize redis pubsub subscriber"
+            );
+            ApiError::dependency_unavailable("sse stream unavailable", request_id.clone())
+        })?;
+
+    // Heartbeats (spec requires explicit heartbeat events, not just SSE comments).
+    let hb_secs = state.settings.sse_heartbeat_interval_secs.max(1);
+    spawn_heartbeat(tx.clone(), hb_secs, request_id.clone());
+
+    let stream = stream::unfold((rx, guard), |(mut rx, guard)| async {
+        match rx.recv().await {
+            Some(payload) => {
+                let ev = axum::response::sse::Event::default().data(payload);
+                Some((Ok::<_, Infallible>(ev), (rx, guard)))
+            }
+            None => None,
+        }
+    });
+
+    let sse = axum::response::sse::Sse::new(stream);
+    let mut resp = sse.into_response();
+
+    // Helpful for nginx (prevents proxy buffering).
+    resp.headers_mut().insert(
+        "x-accel-buffering",
+        axum::http::HeaderValue::from_static("no"),
+    );
+
+    Ok(resp)
+}
+
+fn spawn_heartbeat(tx: tokio::sync::mpsc::Sender<String>, hb_secs: u64, request_id: String) {
+    tokio::spawn(async move {
+        // Send an immediate heartbeat so clients can confirm the stream is live.
+        if let Ok(payload) = serde_json::to_string(&LikeStreamEvent::heartbeat(Utc::now())) {
+            let _ = tx.try_send(payload);
+        }
+
+        let mut ticker = tokio::time::interval(Duration::from_secs(hb_secs));
+        loop {
+            ticker.tick().await;
+            if tx.is_closed() {
+                break;
+            }
+
+            let payload = match serde_json::to_string(&LikeStreamEvent::heartbeat(Utc::now())) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        service = "social-api",
+                        request_id = %request_id,
+                        error_type = "sse_heartbeat",
+                        error_message = %e,
+                        "failed to serialize heartbeat"
+                    );
+                    continue;
+                }
+            };
+
+            // Best-effort: if the client is slow and the buffer is full, drop the heartbeat.
+            let _ = tx.try_send(payload);
+        }
+    });
+}
+
+struct SseConnectionGuard {
+    metrics: Arc<crate::infra::metrics::Metrics>,
+    request_id: String,
+    client_ip: String,
+    content_type: String,
+    content_id: String,
+}
+
+impl SseConnectionGuard {
+    fn new(
+        metrics: Arc<crate::infra::metrics::Metrics>,
+        request_id: String,
+        client_ip: String,
+        key: &ContentKey,
+    ) -> Self {
+        Self {
+            metrics,
+            request_id,
+            client_ip,
+            content_type: key.content_type.clone(),
+            content_id: key.content_id.to_string(),
+        }
+    }
+}
+
+impl Drop for SseConnectionGuard {
+    fn drop(&mut self) {
+        self.metrics.sse_connections_active.dec();
+        tracing::info!(
+            service = "social-api",
+            request_id = %self.request_id,
+            client_ip = %self.client_ip,
+            content_type = %self.content_type,
+            content_id = %self.content_id,
+            "sse disconnected"
+        );
+    }
+}
+
+fn client_ip(headers: &HeaderMap) -> String {
+    // Return an owned String to avoid lifetime issues when picking substrings.
+    let pick_first = |raw: &str| raw.split(',').next().unwrap_or(raw).trim().to_string();
+
+    if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        return pick_first(v);
+    }
+
+    if let Some(v) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        return pick_first(v);
+    }
+
+    "unknown".to_string()
 }
 
 async fn authenticate(

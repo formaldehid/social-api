@@ -117,3 +117,9 @@ pub struct TopLikedItem {
     pub content_id: Uuid,
     pub count: i64,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamQuery {
+    pub content_type: String,
+    pub content_id: String,
+}
