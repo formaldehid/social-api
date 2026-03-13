@@ -6,7 +6,8 @@ use crate::{
             pg_likes::PgLikesRepository, pg_likes_writer::PgLikesWriter,
             redis_content_validation::RedisContentValidationCache,
             redis_leaderboard_cache::RedisLeaderboardCache,
-            redis_like_counts::RedisLikeCountsCache, redis_rate_limiter::RedisRateLimiter,
+            redis_like_counts::RedisLikeCountsCache, redis_like_events::RedisLikeEventBus,
+            redis_rate_limiter::RedisRateLimiter,
         },
     },
     infra::{config::Settings, metrics::Metrics},
@@ -38,6 +39,7 @@ pub struct AppState {
     pub like_counts_cache: RedisLikeCountsCache,
     pub likes_repo: PgLikesRepository,
     pub likes_writer: PgLikesWriter,
+    pub like_events: RedisLikeEventBus,
     pub rate_limiter: RedisRateLimiter,
 
     pub leaderboard: LeaderboardSvc,
@@ -129,6 +131,9 @@ impl AppState {
         let likes_repo = PgLikesRepository::new(db_reader.clone());
         let likes_writer = PgLikesWriter::new(db_writer.clone());
 
+        let like_events =
+            RedisLikeEventBus::new(redis.clone(), settings.redis_url.clone(), metrics.clone());
+
         let leaderboard_ttl_secs = settings
             .leaderboard_refresh_interval_secs
             .saturating_mul(2)
@@ -156,6 +161,7 @@ impl AppState {
             like_counts_cache,
             likes_repo,
             likes_writer,
+            like_events,
             rate_limiter,
             leaderboard,
             leaderboard_cache,

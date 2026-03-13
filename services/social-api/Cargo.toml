@@ -12,6 +12,7 @@ axum = { workspace = true, features = ["macros"] }
 base64 = { workspace = true }
 chrono = { workspace = true }
 deadpool-redis = { workspace = true }
+futures = { workspace = true }
 prometheus = { workspace = true }
 redis = { workspace = true, features = ["tokio-comp"] }
 reqwest = { workspace = true, features = ["json"] }
