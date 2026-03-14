@@ -1,0 +1,516 @@
+openapi: 3.1.0
+info:
+  title: Social API
+  version: 0.6.0
+  description: >-
+    REST API for content likes, counts, statuses, leaderboards, and SSE updates.
+servers:
+  - url: http://localhost:8080
+paths:
+  /health/live:
+    get:
+      summary: Liveness probe
+      operationId: healthLive
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: live
+                required: [status]
+  /health/ready:
+    get:
+      summary: Readiness probe
+      operationId: healthReady
+      responses:
+        '200':
+          description: All critical dependencies are reachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthReadyResponse'
+        '503':
+          description: One or more dependencies are unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthReadyResponse'
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      operationId: metrics
+      responses:
+        '200':
+          description: Prometheus exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+  /v1/likes:
+    post:
+      summary: Like content
+      operationId: likeContent
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LikeRequest'
+      responses:
+        '201':
+          description: Like registered or already existed
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LikeResponse'
+        '400': { $ref: '#/components/responses/BadRequestError' }
+        '401': { $ref: '#/components/responses/UnauthorizedError' }
+        '404': { $ref: '#/components/responses/ContentNotFoundError' }
+        '429': { $ref: '#/components/responses/RateLimitedError' }
+        '503': { $ref: '#/components/responses/DependencyUnavailableError' }
+  /v1/likes/{content_type}/{content_id}:
+    delete:
+      summary: Unlike content
+      operationId: unlikeContent
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ContentTypePath'
+        - $ref: '#/components/parameters/ContentIdPath'
+        - $ref: '#/components/parameters/RequestIdHeader'
+      responses:
+        '200':
+          description: Unlike processed idempotently
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnlikeResponse'
+        '400': { $ref: '#/components/responses/BadRequestError' }
+        '401': { $ref: '#/components/responses/UnauthorizedError' }
+        '429': { $ref: '#/components/responses/RateLimitedError' }
+  /v1/likes/{content_type}/{content_id}/count:
+    get:
+      summary: Get public like count
+      operationId: getLikeCount
+      parameters:
+        - $ref: '#/components/parameters/ContentTypePath'
+        - $ref: '#/components/parameters/ContentIdPath'
+      responses:
+        '200':
+          description: Current count
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CountResponse'
+        '400': { $ref: '#/components/responses/BadRequestError' }
+        '429': { $ref: '#/components/responses/RateLimitedError' }
+  /v1/likes/{content_type}/{content_id}/status:
+    get:
+      summary: Get authenticated user's like status
+      operationId: getLikeStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ContentTypePath'
+        - $ref: '#/components/parameters/ContentIdPath'
+        - $ref: '#/components/parameters/RequestIdHeader'
+      responses:
+        '200':
+          description: Status for current user
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400': { $ref: '#/components/responses/BadRequestError' }
+        '401': { $ref: '#/components/responses/UnauthorizedError' }
+        '429': { $ref: '#/components/responses/RateLimitedError' }
+  /v1/likes/user:
+    get:
+      summary: Get user's liked items
+      operationId: getUserLikes
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: content_type
+          in: query
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - $ref: '#/components/parameters/RequestIdHeader'
+      responses:
+        '200':
+          description: Page of liked items
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserLikesResponse'
+        '400': { $ref: '#/components/responses/BadRequestError' }
+        '401': { $ref: '#/components/responses/UnauthorizedError' }
+  /v1/likes/batch/counts:
+    post:
+      summary: Batch like counts
+      operationId: batchCounts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchItemsRequest'
+      responses:
+        '200':
+          description: Count results in request order
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchCountsResponse'
+        '400': { $ref: '#/components/responses/BadRequestError' }
+        '429': { $ref: '#/components/responses/RateLimitedError' }
+  /v1/likes/batch/statuses:
+    post:
+      summary: Batch like statuses for authenticated user
+      operationId: batchStatuses
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchItemsRequest'
+      responses:
+        '200':
+          description: Status results in request order
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchStatusesResponse'
+        '400': { $ref: '#/components/responses/BadRequestError' }
+        '401': { $ref: '#/components/responses/UnauthorizedError' }
+        '429': { $ref: '#/components/responses/RateLimitedError' }
+  /v1/likes/top:
+    get:
+      summary: Top liked content by time window
+      operationId: topLiked
+      parameters:
+        - name: content_type
+          in: query
+          schema:
+            type: string
+        - name: window
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [24h, 7d, 30d, all]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+      responses:
+        '200':
+          description: Leaderboard response
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TopLikedResponse'
+        '400': { $ref: '#/components/responses/BadRequestError' }
+        '429': { $ref: '#/components/responses/RateLimitedError' }
+  /v1/likes/stream:
+    get:
+      summary: SSE stream for one content item
+      operationId: likeEventStream
+      parameters:
+        - name: content_type
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: content_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: SSE event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                like:
+                  value: |
+                    data: {"event":"like","user_id":"usr_550e8400-e29b-41d4-a716-446655440001","count":42,"timestamp":"2026-02-02T17:00:01Z"}
+                    
+                    data: {"event":"heartbeat","timestamp":"2026-02-02T17:00:15Z"}
+        '400': { $ref: '#/components/responses/BadRequestError' }
+        '503': { $ref: '#/components/responses/DependencyUnavailableError' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: token
+  parameters:
+    RequestIdHeader:
+      name: X-Request-Id
+      in: header
+      required: false
+      schema:
+        type: string
+    ContentTypePath:
+      name: content_type
+      in: path
+      required: true
+      schema:
+        type: string
+    ContentIdPath:
+      name: content_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  headers:
+    RateLimitLimit:
+      schema:
+        type: integer
+    RateLimitRemaining:
+      schema:
+        type: integer
+    RateLimitReset:
+      schema:
+        type: integer
+    RetryAfter:
+      schema:
+        type: integer
+  responses:
+    BadRequestError:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    UnauthorizedError:
+      description: Missing or invalid token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    ContentNotFoundError:
+      description: Content item does not exist
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    RateLimitedError:
+      description: Rate limit exceeded
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+        X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    DependencyUnavailableError:
+      description: Downstream dependency unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+  schemas:
+    LikeRequest:
+      type: object
+      properties:
+        content_type: { type: string }
+        content_id: { type: string, format: uuid }
+      required: [content_type, content_id]
+    ContentRef:
+      type: object
+      properties:
+        content_type: { type: string }
+        content_id: { type: string, format: uuid }
+      required: [content_type, content_id]
+    LikeResponse:
+      type: object
+      properties:
+        liked: { type: boolean, example: true }
+        already_existed: { type: boolean, example: false }
+        count: { type: integer, format: int64, example: 42 }
+        liked_at: { type: string, format: date-time }
+      required: [liked, already_existed, count, liked_at]
+    UnlikeResponse:
+      type: object
+      properties:
+        liked: { type: boolean, example: false }
+        was_liked: { type: boolean, example: true }
+        count: { type: integer, format: int64, example: 41 }
+      required: [liked, was_liked, count]
+    CountResponse:
+      type: object
+      properties:
+        content_type: { type: string }
+        content_id: { type: string, format: uuid }
+        count: { type: integer, format: int64 }
+      required: [content_type, content_id, count]
+    StatusResponse:
+      type: object
+      properties:
+        liked: { type: boolean }
+        liked_at:
+          oneOf:
+            - { type: string, format: date-time }
+            - { type: 'null' }
+      required: [liked, liked_at]
+    UserLikeItem:
+      type: object
+      properties:
+        content_type: { type: string }
+        content_id: { type: string, format: uuid }
+        liked_at: { type: string, format: date-time }
+      required: [content_type, content_id, liked_at]
+    UserLikesResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/UserLikeItem' }
+        next_cursor:
+          oneOf:
+            - { type: string }
+            - { type: 'null' }
+        has_more: { type: boolean }
+      required: [items, next_cursor, has_more]
+    BatchItemsRequest:
+      type: object
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/ContentRef' }
+      required: [items]
+    BatchCountsResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/CountResponse' }
+      required: [results]
+    BatchStatusItem:
+      type: object
+      properties:
+        content_type: { type: string }
+        content_id: { type: string, format: uuid }
+        liked: { type: boolean }
+        liked_at:
+          oneOf:
+            - { type: string, format: date-time }
+            - { type: 'null' }
+      required: [content_type, content_id, liked, liked_at]
+    BatchStatusesResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/BatchStatusItem' }
+      required: [results]
+    TopLikedItem:
+      type: object
+      properties:
+        content_type: { type: string }
+        content_id: { type: string, format: uuid }
+        count: { type: integer, format: int64 }
+      required: [content_type, content_id, count]
+    TopLikedResponse:
+      type: object
+      properties:
+        window: { type: string, enum: [24h, 7d, 30d, all] }
+        content_type:
+          oneOf:
+            - { type: string }
+            - { type: 'null' }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TopLikedItem' }
+      required: [window, content_type, items]
+    HealthReadyResponse:
+      type: object
+      properties:
+        ready: { type: boolean }
+        checks:
+          type: object
+          additionalProperties: true
+      required: [ready, checks]
+    ApiError:
+      type: object
+      properties:
+        code: { type: string }
+        message: { type: string }
+        request_id: { type: string }
+        details:
+          oneOf:
+            - { type: object, additionalProperties: true }
+            - { type: 'null' }
+      required: [code, message, request_id]
+    ErrorEnvelope:
+      type: object
+      properties:
+        error: { $ref: '#/components/schemas/ApiError' }
+      required: [error]

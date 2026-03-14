@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package profile.v1;
+
+service ProfileAuth {
+  rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse);
+}
+
+message ValidateTokenRequest {
+  string bearer_token = 1;
+}
+
+message ValidateTokenResponse {
+  bool valid = 1;
+  optional string user_id = 2;
+  optional string display_name = 3;
+  optional string error = 4;
+}
