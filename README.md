@@ -42,6 +42,12 @@ curl -s http://localhost:8080/v1/likes/post/731b0395-4888-4822-b516-05b4b7bf2089
 curl -s -X DELETE http://localhost:8080/v1/likes/post/731b0395-4888-4822-b516-05b4b7bf2089 \
   -H "Authorization: Bearer tok_user_1" | jq .
 
+# Leaderboard (public)
+curl -s "http://localhost:8080/v1/likes/top?window=24h&limit=5" | jq .
+
+# SSE stream (public, runs until disconnected)
+curl -N "http://localhost:8080/v1/likes/stream?content_type=post&content_id=731b0395-4888-4822-b516-05b4b7bf2089"
+
 # Metrics
 curl -s http://localhost:8080/metrics | head
 ```
@@ -87,6 +93,8 @@ The `/v1/likes/user` endpoint is scaffolded with cursor-based pagination because
   * Count (public) + Batch counts (public)
   * Status (auth) + Batch statuses (auth)
   * User likes (auth, cursor-based pagination)
+  * Leaderboard `/v1/likes/top` (24h/7d/30d/all)
+  * SSE stream `/v1/likes/stream` (live like/unlike updates + heartbeat)
 * End-to-end contract tests (Rust) that run against the docker-compose stack (GitHub Actions + local)
 
 Additional production hardening already implemented:
@@ -94,13 +102,19 @@ Additional production hardening already implemented:
 * Redis-backed rate limiting middleware with required `X-RateLimit-*` headers + `Retry-After` on 429
 * Circuit breaker state machine (closed/half-open/open) around external calls
 * Redis caching of content validation results (content existence) to reduce dependency pressure
+* Leaderboard caching in Redis + background refresher (`LEADERBOARD_REFRESH_INTERVAL_SECS`)
+* SSE event streaming backed by Redis Pub/Sub (`likes:events:{content_type}:{content_id}`)
+* Graceful shutdown on SIGTERM:
+  * stop accepting new connections
+  * close SSE connections with a final `shutdown` event
+  * drain in-flight requests with bounded timeout (`SHUTDOWN_TIMEOUT_SECS`, default 30)
+  * close DB pools + drop Redis pool
 
 ## What comes next (planned)
 
 * Hot-path caching hardening (stampede control, warmup, bounded staleness decisions)
-* Leaderboard implementation (hourly buckets + periodic refresh)
-* SSE event stream (live like/unlike updates)
 * Deeper integration tests (failure injection: Redis down, circuit breaker open)
+* Graceful shutdown integration test (spawn server, open SSE stream, send SIGTERM)
 * k6 load testing scripts
 
 ## Development
