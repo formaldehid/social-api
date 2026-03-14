@@ -1,0 +1,148 @@
+syntax = "proto3";
+
+package social_api.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service SocialApi {
+  rpc Like(LikeRequest) returns (LikeResponse);
+  rpc Unlike(UnlikeRequest) returns (UnlikeResponse);
+  rpc GetLikeCount(GetLikeCountRequest) returns (GetLikeCountResponse);
+  rpc GetLikeStatus(GetLikeStatusRequest) returns (GetLikeStatusResponse);
+  rpc GetUserLikes(GetUserLikesRequest) returns (GetUserLikesResponse);
+  rpc BatchGetLikeCounts(BatchGetLikeCountsRequest) returns (BatchGetLikeCountsResponse);
+  rpc BatchGetLikeStatuses(BatchGetLikeStatusesRequest) returns (BatchGetLikeStatusesResponse);
+  rpc GetTopLikedContent(GetTopLikedContentRequest) returns (GetTopLikedContentResponse);
+  rpc StreamLikeEvents(StreamLikeEventsRequest) returns (stream LikeStreamEvent);
+}
+
+message ContentRef {
+  string content_type = 1;
+  string content_id = 2;
+}
+
+message LikeRequest {
+  string auth_token = 1;
+  string content_type = 2;
+  string content_id = 3;
+}
+
+message LikeResponse {
+  bool liked = 1;
+  bool already_existed = 2;
+  int64 count = 3;
+  google.protobuf.Timestamp liked_at = 4;
+}
+
+message UnlikeRequest {
+  string auth_token = 1;
+  string content_type = 2;
+  string content_id = 3;
+}
+
+message UnlikeResponse {
+  bool liked = 1;
+  bool was_liked = 2;
+  int64 count = 3;
+}
+
+message GetLikeCountRequest {
+  string content_type = 1;
+  string content_id = 2;
+}
+
+message GetLikeCountResponse {
+  string content_type = 1;
+  string content_id = 2;
+  int64 count = 3;
+}
+
+message GetLikeStatusRequest {
+  string auth_token = 1;
+  string content_type = 2;
+  string content_id = 3;
+}
+
+message GetLikeStatusResponse {
+  bool liked = 1;
+  google.protobuf.Timestamp liked_at = 2;
+}
+
+message GetUserLikesRequest {
+  string auth_token = 1;
+  optional string content_type = 2;
+  optional string cursor = 3;
+  uint32 limit = 4;
+}
+
+message UserLikeItem {
+  string content_type = 1;
+  string content_id = 2;
+  google.protobuf.Timestamp liked_at = 3;
+}
+
+message GetUserLikesResponse {
+  repeated UserLikeItem items = 1;
+  optional string next_cursor = 2;
+  bool has_more = 3;
+}
+
+message BatchGetLikeCountsRequest {
+  repeated ContentRef items = 1;
+}
+
+message BatchCountItem {
+  string content_type = 1;
+  string content_id = 2;
+  int64 count = 3;
+}
+
+message BatchGetLikeCountsResponse {
+  repeated BatchCountItem results = 1;
+}
+
+message BatchGetLikeStatusesRequest {
+  string auth_token = 1;
+  repeated ContentRef items = 2;
+}
+
+message BatchStatusItem {
+  string content_type = 1;
+  string content_id = 2;
+  bool liked = 3;
+  google.protobuf.Timestamp liked_at = 4;
+}
+
+message BatchGetLikeStatusesResponse {
+  repeated BatchStatusItem results = 1;
+}
+
+message GetTopLikedContentRequest {
+  optional string content_type = 1;
+  string window = 2;
+  uint32 limit = 3;
+}
+
+message TopLikedItem {
+  string content_type = 1;
+  string content_id = 2;
+  int64 count = 3;
+}
+
+message GetTopLikedContentResponse {
+  string window = 1;
+  optional string content_type = 2;
+  repeated TopLikedItem items = 3;
+}
+
+message StreamLikeEventsRequest {
+  string content_type = 1;
+  string content_id = 2;
+}
+
+message LikeStreamEvent {
+  string event = 1;
+  optional string user_id = 2;
+  optional int64 count = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}

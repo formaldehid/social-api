@@ -39,7 +39,7 @@ pub async fn enforce(
     let is_write = is_write_endpoint(req.method().as_str(), matched_path);
 
     let (scope, id, limit) = if is_write {
-        let limit = state.settings.rate_limit_write_per_minute as u64;
+        let limit = state.settings.rate_limit_write_per_minute;
 
         // "Per-user" is enforced per auth token (tokens map 1:1 to users in the provided spec).
         // Note: in a production system you might want to hash the token before using it as a Redis key.
@@ -48,7 +48,7 @@ pub async fn enforce(
 
         ("write", user_key, limit)
     } else {
-        let limit = state.settings.rate_limit_read_per_minute as u64;
+        let limit = state.settings.rate_limit_read_per_minute;
         ("read", client_ip_key(&req), limit)
     };
 

@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package content.v1;
+
+service ContentCatalog {
+  rpc GetContent(GetContentRequest) returns (GetContentResponse);
+}
+
+message GetContentRequest {
+  string content_type = 1;
+  string content_id = 2;
+}
+
+message GetContentResponse {
+  string id = 1;
+  string title = 2;
+  string content_type = 3;
+}

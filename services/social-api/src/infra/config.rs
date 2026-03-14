@@ -21,8 +21,8 @@ pub struct Settings {
     pub db_min_connections: u32,
     pub db_acquire_timeout_secs: u64,
     pub redis_pool_size: usize,
-    pub rate_limit_write_per_minute: u16,
-    pub rate_limit_read_per_minute: u16,
+    pub rate_limit_write_per_minute: u64,
+    pub rate_limit_read_per_minute: u64,
     pub cache_ttl_like_counts_secs: u64,
     pub cache_ttl_content_validation_secs: u64,
     pub cache_ttl_user_status_secs: u64,
@@ -91,8 +91,8 @@ impl Settings {
             db_acquire_timeout_secs: opt_parse("DB_ACQUIRE_TIMEOUT_SECS", 5u64)?,
             redis_pool_size: opt_parse("REDIS_POOL_SIZE", 10usize)?,
 
-            rate_limit_write_per_minute: opt_parse("RATE_LIMIT_WRITE_PER_MINUTE", 30u16)?,
-            rate_limit_read_per_minute: opt_parse("RATE_LIMIT_READ_PER_MINUTE", 1000u16)?,
+            rate_limit_write_per_minute: opt_parse("RATE_LIMIT_WRITE_PER_MINUTE", 30u64)?,
+            rate_limit_read_per_minute: opt_parse("RATE_LIMIT_READ_PER_MINUTE", 1000u64)?,
 
             cache_ttl_like_counts_secs: opt_parse("CACHE_TTL_LIKE_COUNTS_SECS", 300u64)?,
             cache_ttl_content_validation_secs: opt_parse(
