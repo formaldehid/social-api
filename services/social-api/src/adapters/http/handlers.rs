@@ -8,7 +8,7 @@ use axum::{
     Json,
 };
 use chrono::Utc;
-use futures::stream;
+use futures::stream::unfold;
 use social_core::domain::{ContentKey, LeaderboardWindow};
 use social_core::ports::AuthProvider;
 use social_core::ports::ContentCatalog;
@@ -23,6 +23,18 @@ pub async fn health_live() -> Json<HealthLiveResponse> {
 
 pub async fn health_ready(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let request_id = request_id(&headers);
+
+    // During graceful shutdown we should fail readiness quickly so upstream load balancers
+    // stop routing traffic to this instance.
+    if state.shutdown.is_triggered() {
+        let body = HealthReadyResponse {
+            ready: false,
+            checks: serde_json::json!({
+                "shutdown": { "ok": false }
+            }),
+        };
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
+    }
 
     let mut checks = serde_json::Map::new();
     let mut ready = true;
@@ -634,36 +646,81 @@ pub async fn stream(
     let guard = SseConnectionGuard::new(state.metrics.clone(), request_id.clone(), client_ip, &key);
 
     // Subscribe to Redis PubSub channel for this content item.
-    let _subscriber_task = state
+    state
         .like_events
         .spawn_subscriber(key.clone(), tx.clone(), request_id.clone())
         .await
         .map_err(|e| {
-            tracing::warn!(
+            tracing::error!(
                 service = "social-api",
                 request_id = %request_id,
                 content_type = %key.content_type,
                 content_id = %key.content_id,
-                error_type = "sse_pubsub",
+                error_type = "sse_subscribe",
                 error_message = %e,
-                "failed to initialize redis pubsub subscriber"
+                "failed to subscribe to like events"
             );
-            ApiError::dependency_unavailable("sse stream unavailable", request_id.clone())
-        })?;
+        })
+        .expect("failed to subscribe to like events");
 
     // Heartbeats (spec requires explicit heartbeat events, not just SSE comments).
     let hb_secs = state.settings.sse_heartbeat_interval_secs.max(1);
     spawn_heartbeat(tx.clone(), hb_secs, request_id.clone());
 
-    let stream = stream::unfold((rx, guard), |(mut rx, guard)| async {
-        match rx.recv().await {
-            Some(payload) => {
-                let ev = axum::response::sse::Event::default().data(payload);
-                Some((Ok::<_, Infallible>(ev), (rx, guard)))
+    let shutdown = state.shutdown.subscribe();
+
+    // 0 = running
+    // 1 = send shutdown event then close
+    // 2 = closed
+    let initial_phase: u8 = if state.shutdown.is_triggered() { 1 } else { 0 };
+
+    let stream = unfold(
+        (rx, shutdown, guard, initial_phase),
+        |(mut rx, mut shutdown, guard, mut phase)| async move {
+            loop {
+                if phase == 2 {
+                    return None;
+                }
+
+                if phase == 1 {
+                    // Final event so the frontend can show a stable UI before the stream ends.
+                    let payload = serde_json::to_string(&LikeStreamEvent::shutdown(Utc::now()))
+                        .unwrap_or_else(|_| {
+                            "{\"event\":\"shutdown\",\"timestamp\":\"\"}".to_string()
+                        });
+                    let ev = axum::response::sse::Event::default().data(payload);
+                    return Some((Ok::<_, Infallible>(ev), (rx, shutdown, guard, 2)));
+                }
+
+                tokio::select! {
+                    biased;
+                    changed = shutdown.changed() => {
+                        let shutdown_now = match changed {
+                            Ok(()) => *shutdown.borrow(),
+                            Err(_) => true, // sender dropped: treat as shutdown
+                        };
+
+                        if shutdown_now {
+                            phase = 1;
+                            continue;
+                        }
+
+                        // Not expected (we never transition false->true->false), but keep the stream alive.
+                        continue;
+                    }
+                    msg = rx.recv() => {
+                        match msg {
+                            Some(payload) => {
+                                let ev = axum::response::sse::Event::default().data(payload);
+                                return Some((Ok::<_, Infallible>(ev), (rx, shutdown, guard, 0)));
+                            }
+                            None => return None,
+                        }
+                    }
+                }
             }
-            None => None,
-        }
-    });
+        },
+    );
 
     let sse = axum::response::sse::Sse::new(stream);
     let mut resp = sse.into_response();

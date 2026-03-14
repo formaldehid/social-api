@@ -10,7 +10,7 @@ use crate::{
             redis_rate_limiter::RedisRateLimiter,
         },
     },
-    infra::{config::Settings, metrics::Metrics},
+    infra::{config::Settings, metrics::Metrics, shutdown::Shutdown},
 };
 use social_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use social_core::usecases::{LeaderboardService, LikeCountsService};
@@ -31,6 +31,8 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub metrics: Arc<Metrics>,
 
+    pub shutdown: Shutdown,
+
     pub content_registry: Arc<HashMap<String, Url>>,
     pub auth: ProfileHttpAuth,
     pub content_catalog: HttpContentCatalog,
@@ -50,6 +52,9 @@ pub struct AppState {
 impl AppState {
     pub async fn try_new(settings: Settings) -> anyhow::Result<Self> {
         let metrics = Metrics::new()?;
+
+        // Global shutdown signal used by SSE and background tasks.
+        let shutdown = Shutdown::new();
 
         let http_client = reqwest::Client::builder()
             .user_agent("social-api/0.1")
@@ -154,6 +159,7 @@ impl AppState {
             redis,
             http_client,
             metrics,
+            shutdown,
             content_registry,
             auth,
             content_catalog,

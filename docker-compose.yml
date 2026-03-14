@@ -14,8 +14,12 @@ services:
       PROFILE_API_URL: http://mock-profile-api:8080
       LOG_LEVEL: info
       LEADERBOARD_REFRESH_INTERVAL_SECS: 60
+      SHUTDOWN_TIMEOUT_SECS: 30
+      SSE_HEARTBEAT_INTERVAL_SECS: 15
     ports:
       - "8080:8080"
+    # Allow the service enough time to drain in-flight requests (default SHUTDOWN_TIMEOUT_SECS=30).
+    stop_grace_period: 35s
     depends_on:
       postgres:
         condition: service_healthy
